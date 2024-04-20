@@ -15,7 +15,7 @@ import (
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	arkose "github.com/yhhit/funcaptcha"
+	arkose "github.com/lyy0709/funcaptcha"
 )
 
 type Error struct {
@@ -302,6 +302,7 @@ func (userLogin *UserLogin) GetAccessTokenInternal(code string) (string, string,
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", "", 0, err
 	}
+	fmt.Println(result)
 	// Check if access token in data
 	if _, ok := result["accessToken"]; !ok {
 		result_string := fmt.Sprintf("%v", result)

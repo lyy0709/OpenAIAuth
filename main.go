@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/yhhit/OpenAIAuth/auth"
+	"github.com/lyy0709/OpenAIAuth/auth"
 )
 
 func main() {
-	auth := auth.NewAuthenticator(os.Getenv("OPENAI_EMAIL"), os.Getenv("OPENAI_PASSWORD"), os.Getenv("PROXY"))
+	auth := auth.NewAuthenticator("", "", "")
 	err := auth.Begin()
 	if err != nil {
 		println("Error: " + err.Details)
