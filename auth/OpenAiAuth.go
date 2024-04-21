@@ -210,18 +210,24 @@ type ResponseData struct {
 }
 
 func (userLogin *UserLogin) setArkoseUrl(ArkoseUrl, dx string) (int, error) {
+	retryCount := 0
     for {
+		retryCount++
+        if retryCount > 3 {
+            fmt.Println("Maximum retry limit reached")
+            return http.StatusInternalServerError, nil
+        }
         postData := PostData{Blob: dx}
         jsonData, err := json.Marshal(postData)
         if err != nil {
-            println("Error marshalling post data")
+            fmt.Println("Error marshalling post data")
             return http.StatusInternalServerError, err
         }
 
         // 发送POST请求
         resp, err := http.Post(userLogin.ArkoseUrl, "application/json", bytes.NewBuffer(jsonData))
         if err != nil {
-            println("Error sending POST request")
+            fmt.Println("Error sending POST request")
             return http.StatusInternalServerError, err
         }
         defer resp.Body.Close()
@@ -230,7 +236,7 @@ func (userLogin *UserLogin) setArkoseUrl(ArkoseUrl, dx string) (int, error) {
         var responseData ResponseData
         err = json.NewDecoder(resp.Body).Decode(&responseData)
         if err != nil {
-            println("Error decoding response data")
+            fmt.Println("Error decoding response data")
             return http.StatusInternalServerError, err
         }
 
