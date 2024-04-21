@@ -10,7 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"bytes"
 
+	uuidpkg "github.com/google/uuid"
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
@@ -37,9 +39,10 @@ type AccountCookies map[string][]*http.Cookie
 var allCookies AccountCookies
 
 type Result struct {
-	AccessToken  string `json:"access_token"`
+	AccessToken string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
-	PUID         string `json:"puid"`
+	PUID        string `json:"puid"`
+	TeamUserID  string `json:"team_uid,omitempty"`
 }
 
 const (
@@ -71,6 +74,7 @@ type UserLogin struct {
 	Password string
 	client   tls_client.HttpClient
 	Result   Result
+	ArkoseUrl string
 }
 
 //goland:noinspection GoUnhandledErrorResult,SpellCheckingInspection
@@ -93,11 +97,12 @@ func getHttpClient() tls_client.HttpClient {
 	return client
 }
 
-func NewAuthenticator(emailAddress, password, proxy string) *UserLogin {
+func NewAuthenticator(emailAddress, password, proxy string, arkoseurl string,) *UserLogin {
 	userLogin := &UserLogin{
 		Username: emailAddress,
 		Password: password,
 		client:   NewHttpClient(proxy),
+		ArkoseUrl: arkoseurl,
 	}
 	return userLogin
 }
@@ -142,6 +147,16 @@ func (userLogin *UserLogin) GetState(authorizedUrl string) (int, error) {
 	return http.StatusOK, nil
 }
 
+func (userLogin *UserLogin) GetDeviceID(authorizedUrl string) (string) {
+	var uuid = uuidpkg.New().String()
+	decodedURL, _ := url.QueryUnescape(authorizedUrl)
+	parsedURL, _ := url.Parse(decodedURL)
+	values := parsedURL.Query()
+	values.Add("device_id", uuid)
+	parsedURL.RawQuery = values.Encode()
+	return parsedURL.String()
+}
+
 //goland:noinspection GoUnhandledErrorResult,GoErrorStringFormat
 func (userLogin *UserLogin) CheckUsername(authorizedUrl string, username string) (string, string, int, error) {
 	u, _ := url.Parse(authorizedUrl)
@@ -184,6 +199,56 @@ func (userLogin *UserLogin) CheckUsername(authorizedUrl string, username string)
 	} else {
 		return "", "", http.StatusInternalServerError, err
 	}
+}
+
+type PostData struct {
+    Blob string `json:"blob"`
+}
+
+type ResponseData struct {
+    Token string `json:"token"`
+}
+
+func (userLogin *UserLogin) setArkoseUrl(ArkoseUrl, dx string) (int, error) {
+    for {
+        postData := PostData{Blob: dx}
+        jsonData, err := json.Marshal(postData)
+        if err != nil {
+            println("Error marshalling post data")
+            return http.StatusInternalServerError, err
+        }
+
+        // 发送POST请求
+        resp, err := http.Post(userLogin.ArkoseUrl, "application/json", bytes.NewBuffer(jsonData))
+        if err != nil {
+            println("Error sending POST request")
+            return http.StatusInternalServerError, err
+        }
+        defer resp.Body.Close()
+
+        // 解析响应数据
+        var responseData ResponseData
+        err = json.NewDecoder(resp.Body).Decode(&responseData)
+        if err != nil {
+            println("Error decoding response data")
+            return http.StatusInternalServerError, err
+        }
+
+        // 使用响应数据
+        token := responseData.Token
+
+        // 检查token是否包含"sup=1|rid="
+        if strings.Contains(token, "sup=1|rid=") {
+            fmt.Println("Arkose token: ", token)
+            u, _ := url.Parse("https://openai.com")
+            cookies := []*http.Cookie{}
+            userLogin.client.GetCookieJar().SetCookies(u, append(cookies, &http.Cookie{Name: "arkoseToken", Value: token}))
+            return http.StatusOK, nil
+        }
+
+        // 如果token不包含"sup=1|rid="，则继续循环，重新发送POST请求
+		time.Sleep(5 * time.Second) // 每次循环之间间隔5秒
+    }
 }
 
 func (userLogin *UserLogin) setArkose(dx string) (int, error) {
@@ -295,23 +360,23 @@ func (userLogin *UserLogin) GetAccessTokenInternal(code string) (string, string,
 			json.NewDecoder(resp.Body).Decode(&responseMap)
 			return "", "", resp.StatusCode, errors.New(responseMap["detail"])
 		}
-
 		return "", "", resp.StatusCode, errors.New(GetAccessTokenErrorMessage)
 	}
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", "", 0, err
 	}
-	fmt.Println(result)
 	// Check if access token in data
 	if _, ok := result["accessToken"]; !ok {
 		result_string := fmt.Sprintf("%v", result)
 		return result_string, "", 0, errors.New("missing access token")
 	}
+	// Check if refresh token in data
 	refreshToken, _ := extractCookieValue(req)
 
 	return result["accessToken"].(string), refreshToken, http.StatusOK, nil
 }
+
 
 func (userLogin *UserLogin) Begin() *Error {
 	_, err, accessToken, RefreshToken := userLogin.GetToken()
@@ -342,8 +407,10 @@ func (userLogin *UserLogin) GetToken() (int, string, string, string) {
 	json.NewDecoder(resp.Body).Decode(&responseMap)
 	authorizedUrl, statusCode, err := userLogin.GetAuthorizedUrl(responseMap["csrfToken"])
 	if err != nil {
-		return statusCode, err.Error(), "", ""
+		return statusCode, err.Error(), "" ,""
 	}
+
+	authorizedUrl = userLogin.GetDeviceID(authorizedUrl)
 
 	// get state
 	statusCode, err = userLogin.GetState(authorizedUrl)
@@ -357,16 +424,22 @@ func (userLogin *UserLogin) GetToken() (int, string, string, string) {
 		return statusCode, err.Error(), "", ""
 	}
 
-	// set arkose captcha
-	statusCode, err = userLogin.setArkose(dx)
-	if err != nil {
-		return statusCode, err.Error(), "", ""
+	if userLogin.ArkoseUrl == "" {
+		statusCode, err = userLogin.setArkose(dx)
+		if err != nil {
+			return statusCode, err.Error(), "", ""
+		}
+	} else {
+		statusCode, err = userLogin.setArkoseUrl(userLogin.ArkoseUrl, dx)
+		if err != nil {
+			return statusCode, err.Error(), "", ""
+		}
 	}
 
 	// check password
 	_, statusCode, err = userLogin.CheckPassword(state, userLogin.Username, userLogin.Password)
 	if err != nil {
-		return statusCode, err.Error(), "", ""
+		return statusCode, err.Error(), "" , ""
 	}
 
 	// get access token
@@ -414,6 +487,41 @@ func (userLogin *UserLogin) GetPUID() (string, *Error) {
 	}
 	// If cookie not found, return error
 	return "", NewError("get_puid", 0, "PUID cookie not found")
+}
+
+type UserID struct {
+	AccountOrdering []string `json:"account_ordering"`
+}
+
+func (userLogin *UserLogin) GetTeamUserID() (string, *Error) {
+	// Check if user has access token
+	if userLogin.Result.AccessToken == "" {
+		return "", NewError("get_teamuserid", 0, "Missing access token")
+	}
+	req, _ := http.NewRequest("GET", "https://chat.openai.com/backend-api/accounts/check/v4-2023-04-27", nil)
+	// Add headers
+	req.Header.Add("Authorization", "Bearer "+userLogin.Result.AccessToken)
+	req.Header.Add("User-Agent", UserAgent)
+
+	resp, err := userLogin.client.Do(req)
+	if err != nil {
+		return "", NewError("get_teamuserid", 0, "Failed to make request")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", NewError("get_teamuserid", resp.StatusCode, "Failed to make request")
+	}
+	var userId UserID
+	err = json.NewDecoder(resp.Body).Decode(&userId)
+	if err != nil {
+		return "", NewError("get_teamuserid", 0, "teamuserid not found")
+	}
+	if len(userId.AccountOrdering) > 1 {
+		userLogin.Result.TeamUserID = userId.AccountOrdering[0]
+		return userId.AccountOrdering[0], nil
+	}
+	// If cookie not found, return error
+	return "", NewError("get_teamuserid", 0, "teamuserid not found")
 }
 
 func init() {
